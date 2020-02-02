@@ -5,7 +5,7 @@ import mxnet as mx
 
 from mxnet import nd, gluon
 from .model import GaussianPolicy, QNetwork
-
+from .utils import MemoryBuffer, hard_update, soft_update
 
 class SAC:
     """
@@ -227,19 +227,3 @@ class SAC:
         with open(name, "r+b") as picklefile:
             data = pickle.load(picklefile)
         return data
-
-
-def soft_update(target, source, tau):
-    for target_param, param in zip(
-        target.collect_params().items(), source.collect_params().items()
-    ):
-        target_param[1].set_data(
-            target_param[1].data() * (1.0 - tau) + param[1].data() * tau
-        )
-
-
-def hard_update(target, source):
-    for target_param, param in zip(
-        target.collect_params().items(), source.collect_params().items()
-    ):
-        target_param[1].set_data(param[1].data())

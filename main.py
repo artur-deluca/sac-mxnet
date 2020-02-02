@@ -1,11 +1,13 @@
 import argparse
 import datetime
 import gym
-import numpy as np
 import itertools
+import math
 import mxnet
+import random
 
-from sac import SAC, ReplayMemory
+from sac import SAC
+from sac.utils import MemoryBuffer
 from tensorboardX import SummaryWriter
 
 parser = argparse.ArgumentParser(description="Soft Actor-Critic (SAC) in MXNet")
@@ -13,12 +15,6 @@ parser.add_argument(
     "--env-name",
     default="MountainCarContinuous-v0",
     help="Gym environment (default: MountainCarContinuous-v0)",
-)
-parser.add_argument(
-    "--eval",
-    type=int,
-    default=10,
-    help="Evaluates a policy a policy every X episodes (default: 10; -1 to disable it)",
 )
 parser.add_argument(
     "--gamma",
@@ -54,10 +50,10 @@ parser.add_argument(
     "--batch_size", type=int, default=256, help="batch size (default: 256)"
 )
 parser.add_argument(
-    "--num_steps",
+    "--num_episodes",
     type=int,
-    default=1000000,
-    help="maximum number of steps (default: 1000000)",
+    default=1000,
+    help="maximum number of episodes (default: 1e3)",
 )
 parser.add_argument(
     "--hidden_size", type=int, default=64, help="hidden size (default: 64)"
@@ -66,13 +62,19 @@ parser.add_argument(
     "--updates_per_step",
     type=int,
     default=1,
-    help="model updates per simulator step (default: 1)",
+    help="number of updates betweeen actions (default: 1)",
+)
+parser.add_argument(
+    "--epsilon",
+    type=float,
+    default=.3,
+    help="ε-greedy exploration factor (default: 0.3)",
 )
 parser.add_argument(
     "--start_steps",
     type=int,
-    default=10000,
-    help="Steps sampling random actions (default: 10000)",
+    default=1e4,
+    help="Steps to enforce random actions (default: 1e4)",
 )
 parser.add_argument(
     "--target_update_interval",
@@ -83,8 +85,20 @@ parser.add_argument(
 parser.add_argument(
     "--replay_size",
     type=int,
-    default=1000000,
-    help="size of replay buffer (default: 10000000)",
+    default=1e6,
+    help="size of replay buffer (default: 1e6)",
+)
+parser.add_argument(
+    "--eval_X",
+    type=int,
+    default=10,
+    help="Evaluates a policy a policy every X episodes (default: 10; -1 to disable it)",
+)
+parser.add_argument(
+    "--verbose",
+    type=int,
+    default=1,
+    help="Set verbosity  [0: disabled, 1: every `eval_X` episodes, 2: every episode] (default: 1)",
 )
 parser.add_argument("--gpu", action="store_true", help="run on GPU (default: False)")
 args = parser.parse_args()
@@ -92,8 +106,9 @@ args = parser.parse_args()
 # Environment
 env = gym.make(args.env_name)
 
+# Seed tools
 mxnet.random.seed(args.seed)
-np.random.seed(args.seed)
+random.seed(args.seed)
 env.seed(args.seed)
 
 # Agent
@@ -105,21 +120,22 @@ filename = "{}_SAC_{}".format(
 )
 writer = SummaryWriter(logdir="logs/{}".format(filename))
 
-# Memory
-memory = ReplayMemory(args.replay_size)
+# Memory buffer
+memory = MemoryBuffer(args.replay_size)
 
 # Training Loop
 total_numsteps = 0
 updates = 0
 
-for i_episode in itertools.count(1):
+for i_episode in range(args.num_episodes):
     episode_reward = 0
     episode_steps = 0
     done = False
     state = env.reset()
 
     while not done:
-        if args.start_steps > total_numsteps:
+        p = random.random()
+        if p < args.epsilon + math.exp(-episode_steps/args.start_steps):
             action = env.action_space.sample()  # Sample random action
         else:
             action = agent.select_action(state)  # Sample action from policy
@@ -135,6 +151,7 @@ for i_episode in itertools.count(1):
                     ent_loss,
                     alpha,
                 ) = agent.update_parameters(memory, args.batch_size, updates)
+
                 writer.add_scalar("loss/critic_1", critic_1_loss, updates)
                 writer.add_scalar("loss/critic_2", critic_2_loss, updates)
                 writer.add_scalar("loss/policy", policy_loss, updates)
@@ -148,7 +165,7 @@ for i_episode in itertools.count(1):
         episode_reward += reward
 
         # Ignore the "done" signal if it comes from hitting the time horizon  mask = (1-d)
-        mask = 1 if episode_steps == env._max_episode_steps else float(not done)
+        mask = 1 if episode_steps == env._max_episode_steps else int(not done)
 
         memory.push(
             state, action, reward, next_state, mask
@@ -156,39 +173,36 @@ for i_episode in itertools.count(1):
 
         state = next_state
 
-    if total_numsteps > args.num_steps:
-        break
-
     writer.add_scalar("reward/train", episode_reward, i_episode)
-    print(
-        "Episode: {}, total numsteps: {}, episode steps: {}, reward: {}".format(
-            i_episode, total_numsteps, episode_steps, round(episode_reward, 2)
+    if args.verbose == 2:
+        print(
+            "Episode: {}, total numsteps: {}, episode steps: {}, reward: {}".format(
+                i_episode, total_numsteps, episode_steps, round(episode_reward, 2)
+            )
         )
-    )
+    if args.eval_X > 0 and args.verbose > 0:
+        if i_episode % args.eval_X == 0 and i_episode > 0:
+            avg_reward = 0.0
+            for _ in range(args.eval_X):
+                state = env.reset()
+                episode_reward = 0
+                done = False
+                while not done:
+                    action = agent.select_action(state, eval=True)
+                    #env.render()
 
-    if args.eval > 0 and i_episode % args.eval == 0:
-        avg_reward = 0.0
-        episodes = args.eval
-        for _ in range(episodes):
-            state = env.reset()
-            episode_reward = 0
-            done = False
-            while not done:
-                action = agent.select_action(state, eval=True)
-                env.render()
+                    next_state, reward, done, _ = env.step(action)
+                    episode_reward += reward
 
-                next_state, reward, done, _ = env.step(action)
-                episode_reward += reward
+                    state = next_state
+                avg_reward += episode_reward
+            avg_reward /= args.eval_X
 
-                state = next_state
-            avg_reward += episode_reward
-        avg_reward /= episodes
+            writer.add_scalar("avg_reward/test", avg_reward, i_episode)
 
-        writer.add_scalar("avg_reward/test", avg_reward, i_episode)
-
-        print("----------------------------------------")
-        print("Test Episodes: {}, Avg. Reward: {}".format(episodes, round(avg_reward, 2)))
-        print("----------------------------------------")
-        env.close()
+            print("----------------------------------------")
+            print("Test Episodes: {}, Avg. Reward: {}".format(i_episode, round(avg_reward, 2)))
+            print("----------------------------------------")
+            env.close()
 
 agent.save_model("saved_models/{}".format(filename))
