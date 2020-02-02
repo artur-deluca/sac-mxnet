@@ -8,7 +8,7 @@ This code was implemented in MXNet 1.4.1. The authors also have an [implementati
 
 
 ## How to use
-```python
+```
 >>> python main.py --help
 
 Soft Actor-Critic (SAC) in MXNet
@@ -16,7 +16,8 @@ Soft Actor-Critic (SAC) in MXNet
 optional arguments:
   -h, --help            show this help message and exit
   --env-name ENV_NAME   Gym environment (default: MountainCarContinuous-v0)
-  --eval EVAL           Evaluates a policy a policy every X episodes (default: 10; -1 to disable it)
+  --eval EVAL           Evaluates a policy a policy every X episodes
+                        (default: 10; -1 to disable it)
   --gamma GAMMA         discount factor for reward (default: 0.99)
   --tau TAU             target smoothing coefficient(τ) (default: 0.005)
   --lr LR               learning rate (default: 0.0003)
