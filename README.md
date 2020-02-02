@@ -8,7 +8,7 @@ This code was implemented in MXNet 1.4.1. The authors also have an [implementati
 
 
 ## How to use
-```python
+```
 >>> python main.py --help
 
 Soft Actor-Critic (SAC) in MXNet
