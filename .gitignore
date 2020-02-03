@@ -3,6 +3,7 @@ saved_models/
 logs/
 test/
 reference/
+*.params
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

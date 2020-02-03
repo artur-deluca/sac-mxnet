@@ -2,6 +2,7 @@ import collections
 import random
 import numpy as np
 
+
 def soft_update(target, source, tau):
     for target_param, param in zip(
         target.collect_params().items(), source.collect_params().items()
@@ -31,6 +32,12 @@ class MemoryBuffer:
                 self.buffer[-1] = (state, action, reward, next_state, mask)
         else:
             self.buffer.append((state, action, reward, next_state, mask))
+
+    def push_bulk(self, transitions):
+        if not transitions[-1][-1]:
+            self.buffer.extendleft(transitions)
+        else:
+            self.buffer.extend(transitions)
 
     def sample(self, batch_size):
         batch = random.sample(self.buffer, batch_size)

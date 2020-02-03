@@ -7,6 +7,7 @@ from mxnet import nd, gluon
 from .model import GaussianPolicy, QNetwork
 from .utils import MemoryBuffer, hard_update, soft_update
 
+
 class SAC:
     """
     Soft-Actor Critic model
@@ -67,18 +68,31 @@ class SAC:
 
         # parameter for casting variables
         self.device = mx.gpu() if gpu else mx.cpu()
+        mx.Context.default_ctx = mx.Context(self.device, 0)
 
         # ==========================================================================================
         # We use a particular variation of SAC that uses Q-networks instead of a value network
         # ==========================================================================================
 
-        self.critic = [QNetwork(num_inputs, action_space.shape[0], hidden_size), QNetwork(num_inputs, action_space.shape[0], hidden_size)] 
-        self.critic_optim = [
-            gluon.Trainer(self.critic[0].collect_params(), "adam", {"learning_rate": lr}),
-            gluon.Trainer(self.critic[1].collect_params(), "adam", {"learning_rate": lr})
+        self.critic = [
+            QNetwork(num_inputs, action_space.shape[0], hidden_size, self.device),
+            QNetwork(num_inputs, action_space.shape[0], hidden_size, self.device),
         ]
 
-        self.critic_target = [QNetwork(num_inputs, action_space.shape[0], hidden_size), QNetwork(num_inputs, action_space.shape[0], hidden_size)]
+        self.critic_optim = [
+            gluon.Trainer(
+                self.critic[0].collect_params(), "adam", {"learning_rate": lr}
+            ),
+            gluon.Trainer(
+                self.critic[1].collect_params(), "adam", {"learning_rate": lr}
+            ),
+        ]
+
+        self.critic_target = [
+            QNetwork(num_inputs, action_space.shape[0], hidden_size, self.device),
+            QNetwork(num_inputs, action_space.shape[0], hidden_size, self.device),
+        ]
+
         # the critic target doesn't need a optimizer, since it uses the update mechanism
         hard_update(self.critic_target[0], self.critic[0])
         hard_update(self.critic_target[1], self.critic[1])
@@ -97,23 +111,24 @@ class SAC:
             )
 
         self.policy = GaussianPolicy(
-            num_inputs, action_space.shape[0], hidden_size, action_space
+            num_inputs, action_space.shape[0], hidden_size, action_space, self.device
         )
+
         self.policy_optim = gluon.Trainer(
             self.policy.collect_params(),
             optimizer="adam",
             optimizer_params={"learning_rate": lr},
         )
 
-
     def select_action(self, state, eval=False):
         state = nd.array(state, ctx=self.device).expand_dims(0)
+        mean, log_std = self.policy(state)
         if eval == False:
             # if not evaluating take the an action sampled from the distribution (stochastic policy)
-            action, _, _ = self.policy.sample(state)
+            action, _, _ = self.policy.sample(mean, log_std)
         else:
             # otherwise take the mean of the distribution to properly evaluate policy
-            _, _, action = self.policy.sample(state)
+            _, _, action = self.policy.sample(mean, log_std)
         return nd.array(action.detach(), ctx=mx.cpu()).asnumpy()[0]
 
     def update_parameters(self, memory, batch_size, updates):
@@ -134,11 +149,16 @@ class SAC:
         # ===============================
 
         # get next states based on current policy
-        next_state_action, next_state_log_pi, _ = self.policy.sample(next_states)
+        mean, log_std = self.policy(next_states)
+        next_state_action, next_state_log_pi, _ = self.policy.sample(mean, log_std)
 
         # get q-values from dual-critic
-        qf1_next_target = self.critic_target[0](next_states, next_state_action)
-        qf2_next_target = self.critic_target[1](next_states, next_state_action)
+        qf1_next_target = self.critic_target[0](
+            next_states, nd.array(next_state_action, ctx=self.device)
+        )
+        qf2_next_target = self.critic_target[1](
+            next_states, nd.array(next_state_action, ctx=self.device)
+        )
 
         # select the minimum between the two q-values
         min_qf_next_target = self.min_between(qf1_next_target, qf2_next_target)
@@ -150,29 +170,29 @@ class SAC:
 
         with mx.autograd.record():
 
-            qf1 = self.critic[0](states, actions)
-            qf2 = self.critic[1](states, actions)
-            qf1_loss = loss_fn(qf1, next_q_value).mean()
-            qf2_loss = loss_fn(qf2, next_q_value).mean()
+            qf1 = self.critic[0](states, actions) # Q_1(st,at)
+            qf1_loss = loss_fn(qf1, next_q_value).mean() # JQ = E_(st,at)~D [ 0.5 ( Q1_(st,at) - r_(st,at) - γ ( E_(st+1)~p [V(st+1)] )) ^2]
+            qf2 = self.critic[1](states, actions) # Q_2(st,at)
+            qf2_loss = loss_fn(qf2, next_q_value).mean() # JQ = E_(st,at)~D [ 0.5 ( Q1_(st,at) - r_(st,at) - γ ( E_(st+1)~p [V(st+1)] )) ^2]
 
-        qf1_loss.backward(retain_graph=True)
-        self.critic_optim[0].step(batch_size, ignore_stale_grad=True)
-        qf2_loss.backward(retain_graph=True)
-        self.critic_optim[0].step(batch_size, ignore_stale_grad=True)
+        mx.autograd.backward([qf1_loss, qf2_loss])
+        self.critic_optim[0].step(1)
+        self.critic_optim[1].step(1)
 
         # ===============================
         #    Minimizing the policy
         # ===============================
 
         with mx.autograd.record():
-            pi, log_pi, _ = self.policy.sample(states)
+            mean, log_std = self.policy(states)
+            pi, log_pi, _ = self.policy.sample(mean, log_std)
             qf1_pi = self.critic[0](states, pi)
             qf2_pi = self.critic[1](states, pi)
             min_qf_pi = self.min_between(qf1_pi, qf2_pi)
             policy_loss = ((self.alpha * log_pi) - min_qf_pi).mean()
 
         policy_loss.backward()
-        self.policy_optim.step(batch_size)
+        self.policy_optim.step(1)
 
         if self.automatic_entropy_tuning:
             with mx.autograd.record():
@@ -181,11 +201,11 @@ class SAC:
                 ).mean()
 
             alpha_loss.backward()
-            self.alpha_optim.step(batch_size)
+            self.alpha_optim.step(1)
 
             self.alpha = self.log_alpha.data().exp()
             alpha_tlogs = self.alpha.copy()  # For TensorboardX logs
-        
+
         else:
             alpha_loss = nd.array(0.0, ctx=self.device)
             alpha_tlogs = nd.array(self.alpha)  # For TensorboardX logs
@@ -227,3 +247,8 @@ class SAC:
         with open(name, "r+b") as picklefile:
             data = pickle.load(picklefile)
         return data
+
+    def set_context(self, device):
+        self.device = device
+        print(device)
+        mx.Context.default_ctx = mx.Context(self.device, 0)

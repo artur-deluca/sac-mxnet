@@ -1,7 +1,6 @@
 import argparse
 import datetime
 import gym
-import itertools
 import math
 import mxnet
 import random
@@ -29,13 +28,13 @@ parser.add_argument(
     help="target smoothing coefficient(τ) (default: 0.005)",
 )
 parser.add_argument(
-    "--lr", type=float, default=0.0003, help="learning rate (default: 0.0003)"
+    "--lr", type=float, default=0.003, help="learning rate (default: 0.0003)"
 )
 parser.add_argument(
     "--alpha",
     type=float,
-    default=0.2,
-    help="Relative importance of the entropy term against the reward (default: 0.2)",
+    default=0.5,
+    help="Relative importance of the entropy term against the reward (default: 0.5)",
 )
 parser.add_argument(
     "--automatic_entropy_tuning",
@@ -61,13 +60,19 @@ parser.add_argument(
 parser.add_argument(
     "--updates_per_step",
     type=int,
-    default=1,
+    default=100,
     help="number of updates betweeen actions (default: 1)",
+)
+parser.add_argument(
+    "--env_steps",
+    type=int,
+    default=2500,
+    help="Maximum number of steps for each episode"
 )
 parser.add_argument(
     "--epsilon",
     type=float,
-    default=.3,
+    default=0.8,
     help="ε-greedy exploration factor (default: 0.3)",
 )
 parser.add_argument(
@@ -83,10 +88,13 @@ parser.add_argument(
     help="Value target update per no. of updates per step (default: 1)",
 )
 parser.add_argument(
-    "--replay_size",
+    "--replay_size", type=int, default=1e6, help="size of replay buffer (default: 1e6)",
+)
+parser.add_argument(
+    "--render",
     type=int,
-    default=1e6,
-    help="size of replay buffer (default: 1e6)",
+    default=0,
+    help="Render mode [0: disabled, 1: every episode, 2: every evaluation] (default: 0)",
 )
 parser.add_argument(
     "--eval_X",
@@ -105,6 +113,7 @@ args = parser.parse_args()
 
 # Environment
 env = gym.make(args.env_name)
+env._max_episode_steps = int(args.env_steps)
 
 # Seed tools
 mxnet.random.seed(args.seed)
@@ -132,32 +141,18 @@ for i_episode in range(args.num_episodes):
     episode_steps = 0
     done = False
     state = env.reset()
+    transitions = list()
 
     while not done:
         p = random.random()
-        if p < args.epsilon + math.exp(-episode_steps/args.start_steps):
+        threshold = args.epsilon + math.exp(-total_numsteps / args.start_steps)
+        if p < threshold:
             action = env.action_space.sample()  # Sample random action
         else:
             action = agent.select_action(state)  # Sample action from policy
 
-        if len(memory) > args.batch_size:
-            # Number of updates per step in environment
-            for i in range(args.updates_per_step):
-                # Update parameters of all the networks
-                (
-                    critic_1_loss,
-                    critic_2_loss,
-                    policy_loss,
-                    ent_loss,
-                    alpha,
-                ) = agent.update_parameters(memory, args.batch_size, updates)
-
-                writer.add_scalar("loss/critic_1", critic_1_loss, updates)
-                writer.add_scalar("loss/critic_2", critic_2_loss, updates)
-                writer.add_scalar("loss/policy", policy_loss, updates)
-                writer.add_scalar("loss/entropy_loss", ent_loss, updates)
-                writer.add_scalar("entropy_temprature/alpha", alpha, updates)
-                updates += 1
+        if args.render > 1:
+            env.render()
 
         next_state, reward, done, _ = env.step(action)
         episode_steps += 1
@@ -166,12 +161,29 @@ for i_episode in range(args.num_episodes):
 
         # Ignore the "done" signal if it comes from hitting the time horizon  mask = (1-d)
         mask = 1 if episode_steps == env._max_episode_steps else int(not done)
-
-        memory.push(
-            state, action, reward, next_state, mask
-        )  # Append transition to memory
+        transitions.append((state, action, reward, next_state, mask))
 
         state = next_state
+
+    memory.push_bulk(transitions)  # Append transition to memory
+    if len(memory) > args.batch_size:
+        # Number of updates per step in environment
+        for i in range(args.updates_per_step):
+            # Update parameters of all the networks
+            (
+                critic_1_loss,
+                critic_2_loss,
+                policy_loss,
+                ent_loss,
+                alpha,
+            ) = agent.update_parameters(memory, args.batch_size, updates)
+
+            writer.add_scalar("loss/critic_1", critic_1_loss, updates)
+            writer.add_scalar("loss/critic_2", critic_2_loss, updates)
+            writer.add_scalar("loss/policy", policy_loss, updates)
+            writer.add_scalar("loss/entropy_loss", ent_loss, updates)
+            writer.add_scalar("entropy_temprature/alpha", alpha, updates)
+            updates += 1
 
     writer.add_scalar("reward/train", episode_reward, i_episode)
     if args.verbose == 2:
@@ -180,28 +192,30 @@ for i_episode in range(args.num_episodes):
                 i_episode, total_numsteps, episode_steps, round(episode_reward, 2)
             )
         )
+
     if args.eval_X > 0 and args.verbose > 0:
         if i_episode % args.eval_X == 0 and i_episode > 0:
-            avg_reward = 0.0
-            for _ in range(args.eval_X):
-                state = env.reset()
-                episode_reward = 0
-                done = False
-                while not done:
-                    action = agent.select_action(state, eval=True)
-                    #env.render()
+            state = env.reset()
+            episode_reward = 0
+            done = False
+            while not done:
+                action = agent.select_action(state, eval=True)
+                if args.render > 0:
+                    env.render()
 
-                    next_state, reward, done, _ = env.step(action)
-                    episode_reward += reward
+                next_state, reward, done, _ = env.step(action)
+                episode_reward += reward
 
-                    state = next_state
-                avg_reward += episode_reward
-            avg_reward /= args.eval_X
+                state = next_state
 
-            writer.add_scalar("avg_reward/test", avg_reward, i_episode)
+            writer.add_scalar("avg_reward/test", episode_reward, i_episode)
 
             print("----------------------------------------")
-            print("Test Episodes: {}, Avg. Reward: {}".format(i_episode, round(avg_reward, 2)))
+            print(
+                "Test Episodes: {}, Avg. Reward: {}".format(
+                    i_episode, round(episode_reward, 2)
+                )
+            )
             print("----------------------------------------")
             env.close()
 
