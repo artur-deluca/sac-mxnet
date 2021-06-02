@@ -32,4 +32,4 @@ six==1.14.0
 tensorboardX==2.0
 tqdm==4.42.0
 ujson==1.35
-urllib3==1.25.8
+urllib3==1.26.5
